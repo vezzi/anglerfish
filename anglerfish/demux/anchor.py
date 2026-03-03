@@ -1,4 +1,5 @@
 import gzip
+import logging
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -102,22 +103,27 @@ def _find_anchor_matches(seq: str, anchor: str, max_edits: int) -> list[AnchorMa
     if len(anchor) == 0:
         return []
 
+    # Fast path: exact search first, even when fuzzy matching is enabled.
+    # If exact matches are found they are always optimal (0 edits).
+    exact_hits = []
+    start = 0
+    while True:
+        pos = seq.find(anchor, start)
+        if pos == -1:
+            break
+        exact_hits.append(AnchorMatch(pos, pos + len(anchor), 0))
+        start = pos + 1
+    if len(exact_hits) > 0:
+        return exact_hits
+
     if max_edits == 0:
-        out = []
-        start = 0
-        while True:
-            pos = seq.find(anchor, start)
-            if pos == -1:
-                break
-            out.append(AnchorMatch(pos, pos + len(anchor), 0))
-            start = pos + 1
-        return out
+        return []
 
     pattern = regex.compile(
         f"({regex.escape(anchor)}){{e<={max_edits}}}", flags=regex.IGNORECASE
     )
     matches = []
-    for m in pattern.finditer(seq, overlapped=True):
+    for m in pattern.finditer(seq):
         subs, ins, dels = m.fuzzy_counts
         matches.append(
             AnchorMatch(start=m.start(), end=m.end(), edits=(subs + ins + dels))
@@ -234,7 +240,12 @@ def _pick_best_orientation(
 
 
 def extract_indices_from_fastqs(
-    fastq_files: list[str], config: AnchorConfig
+    fastq_files: list[str],
+    config: AnchorConfig,
+    total_reads: int | None = None,
+    progress_step_pct: int = 5,
+    logger: logging.Logger | None = None,
+    progress_label: str = "Anchor extraction",
 ) -> tuple[dict[str, ExtractedRead], dict[str, int]]:
     extracted_reads: dict[str, ExtractedRead] = {}
     counts = {
@@ -245,6 +256,7 @@ def extract_indices_from_fastqs(
         "forward_orientation": 0,
         "reverse_orientation": 0,
     }
+    next_progress_pct = progress_step_pct
 
     for read_name, seq in _iter_fastq_reads(fastq_files):
         counts["reads_processed"] += 1
@@ -272,6 +284,44 @@ def extract_indices_from_fastqs(
             counts["forward_orientation"] += 1
         else:
             counts["reverse_orientation"] += 1
+
+        if (
+            logger is not None
+            and total_reads is not None
+            and total_reads > 0
+            and next_progress_pct <= 100
+        ):
+            while (
+                next_progress_pct <= 100
+                and counts["reads_processed"] * 100 >= total_reads * next_progress_pct
+            ):
+                logger.info(
+                    "%s progress: %s%% (%s/%s reads)",
+                    progress_label,
+                    next_progress_pct,
+                    counts["reads_processed"],
+                    total_reads,
+                )
+                next_progress_pct += progress_step_pct
+        elif logger is not None and counts["reads_processed"] % 10000 == 0:
+            logger.info(
+                "%s progress: %s reads processed",
+                progress_label,
+                counts["reads_processed"],
+            )
+
+    if (
+        logger is not None
+        and total_reads is not None
+        and total_reads > 0
+        and next_progress_pct <= 100
+    ):
+        logger.info(
+            "%s progress: 100%% (%s/%s reads)",
+            progress_label,
+            counts["reads_processed"],
+            total_reads,
+        )
 
     return extracted_reads, counts
 

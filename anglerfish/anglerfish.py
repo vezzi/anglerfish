@@ -234,7 +234,12 @@ def run_demux(args):
                 orientation=args.anchor_orientation,
             )
             extracted_reads, anchor_counts = extract_indices_from_fastqs(
-                fastq_files, anchor_config
+                fastq_files,
+                anchor_config,
+                total_reads=num_fq,
+                progress_step_pct=1,
+                logger=log,
+                progress_label=f"{adaptor_bc_name} anchor scan",
             )
 
             if args.force_rc != "original":

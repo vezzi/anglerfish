@@ -49,6 +49,7 @@ def run_diagnose(
     forward_pref = 0
     reverse_pref = 0
     reads_scanned = 0
+    next_progress_pct = 5
 
     for seq in _iter_fastq_reads(fastq):
         reads_scanned += 1
@@ -66,6 +67,19 @@ def run_diagnose(
             forward_pref += 1
         else:
             reverse_pref += 1
+
+        if max_reads > 0:
+            while (
+                next_progress_pct <= 100
+                and reads_scanned * 100 >= max_reads * next_progress_pct
+            ):
+                log.info(
+                    "Diagnose progress: %s%% (%s/%s target reads)",
+                    next_progress_pct,
+                    reads_scanned,
+                    max_reads,
+                )
+                next_progress_pct += 5
 
         if reads_scanned >= max_reads:
             break
