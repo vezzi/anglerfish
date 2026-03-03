@@ -2,10 +2,13 @@ import gzip
 import os
 import tempfile
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from anglerfish.demux.adaptor import Adaptor
 from anglerfish.explore.explore import (
+    _filter_on_numeric_threshold,
     get_explore_results,
     run_multiple_alignments,
     setup_explore_directory,
@@ -222,3 +225,19 @@ def test_get_explore_results_functional_test(explore_fixture):
 
     assert len(adaptors_included) == 1
     assert adaptors_included[0].name == "illumina_ud"
+
+
+def test_filter_on_numeric_threshold_handles_void_like_values():
+    malformed_dtype = np.dtype([("value", "i4")])
+    malformed_values = np.array([(7,), (12,)], dtype=malformed_dtype)
+    df = pd.DataFrame(
+        {
+            "read_name": ["read1", "read2"],
+            "adapter_name": ["truseq_i5", "truseq_i5"],
+            "match_1_len": malformed_values,
+        }
+    )
+
+    filtered_df = _filter_on_numeric_threshold(df, "match_1_len", 5)
+
+    assert len(filtered_df) == 0

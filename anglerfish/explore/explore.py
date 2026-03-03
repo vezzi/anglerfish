@@ -14,6 +14,27 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("explore")
 
 
+def _to_numeric_safe(series: pd.Series) -> pd.Series:
+    """Coerce values to numeric and tolerate malformed object/void dtypes."""
+    try:
+        return pd.to_numeric(series, errors="coerce")
+    except (TypeError, ValueError):
+        return pd.to_numeric(series.astype("string"), errors="coerce")
+
+
+def _filter_on_numeric_threshold(
+    df: pd.DataFrame, column: str, threshold: int | float
+) -> pd.DataFrame:
+    """Return rows where `column` is numeric and >= threshold."""
+    if column not in df.columns:
+        return df.iloc[0:0].copy()
+
+    filtered_df = df.copy()
+    filtered_df[column] = _to_numeric_safe(filtered_df[column])
+    filtered_df = filtered_df.dropna(subset=[column])
+    return filtered_df[filtered_df[column] >= threshold]
+
+
 def run_explore(
     fastq: str,
     outdir: str,
@@ -46,6 +67,11 @@ def run_explore(
     results = check_for_umis(
         results, adaptors_included, entries, umi_threshold, kmer_length, outdir
     )
+
+    if len(results["included_adaptors"]) == 0:
+        log.warning(
+            "No adaptor models met the minimum good-hit threshold; explore finished with no candidate adaptor model."
+        )
 
     explore_stats_file = os.path.join(outdir, "anglerfish_explore_stats.json")
     # Save results to a JSON file
@@ -120,6 +146,19 @@ def get_explore_results(
             log.info(
                 f"No hits for {adaptor.name} in alignment file (perhaps the read file was mis-formatted?)"
             )
+            adaptor_data["i5"] = {
+                "nr_good_hits": 0,
+                "index_length": None,
+                "insert_lengths_histogram": {},
+                "relative_entropy": {},
+            }
+            adaptor_data["i7"] = {
+                "nr_good_hits": 0,
+                "index_length": None,
+                "insert_lengths_histogram": {},
+                "relative_entropy": {},
+            }
+            results["excluded_adaptors"][adaptor.name] = adaptor_data
             continue
 
         # Choose only the highest scoring alignment for each combination of read, adaptor end and strand
@@ -128,6 +167,11 @@ def get_explore_results(
             highest_q_aln = max(alns, key=lambda aln: aln.q)
             reads_to_highest_q_aln_dict[aln_name] = vars(highest_q_aln)
         df = pd.DataFrame.from_dict(reads_to_highest_q_aln_dict, orient="index")
+        for column in ["read_name", "adapter_name", "cs", "cg"]:
+            if column in df.columns:
+                df[column] = df[column].astype("string")
+            else:
+                df[column] = pd.Series([""] * len(df), index=df.index, dtype="string")
         nr_good_hits = {}
 
         # Match Insert Match = mim
@@ -138,21 +182,17 @@ def get_explore_results(
             r"^cs:Z::[1-9][0-9]*\+([a,c,t,g]*):[1-9][0-9]*$"  # Match Insert Match = mim
         )
         mim_re_cg = r"^cg:Z:([0-9]*)M([0-9]*)I([0-9]*)M$"
-        df_mim = df[df.cs.str.match(mim_re_cs)]
+        df_mim = df[df.cs.str.match(mim_re_cs, na=False)].copy()
 
         # Extract the match lengths
         match_col_df = df_mim.cg.str.extract(mim_re_cg).rename(
             {0: "match_1_len", 1: "insert_len", 2: "match_2_len"}, axis=1
         )
-        match_col_df = match_col_df.astype(
-            {
-                "match_1_len": "int32",
-                "insert_len": "int32",
-                "match_2_len": "int32",
-            }
-        )
+        for column in ["match_1_len", "insert_len", "match_2_len"]:
+            match_col_df[column] = _to_numeric_safe(match_col_df[column])
 
         df_mim.loc[match_col_df.index, match_col_df.columns] = match_col_df
+        df_mim = df_mim.dropna(subset=["match_1_len", "insert_len", "match_2_len"])
 
         for adaptor_end_name, adaptor_end in zip(
             ["i5", "i7"], [adaptor.i5, adaptor.i7]
@@ -187,28 +227,40 @@ def get_explore_results(
                         sorted(insert_lengths.index)
                     ].to_dict()
             else:
-                m_re_cs = r"^cs:Z::([1-9][0-9]*)$"
-                df_good_hits = df[df.cg.str.match(m_re_cs)]
-                match_col_df = df_good_hits.cg.str.extract(m_re_cs).rename(
+                m_re_cg = r"^cg:Z:([1-9][0-9]*)M$"
+                df_good_hits = df[
+                    (df["adapter_name"] == f"{adaptor.name}_{adaptor_end_name}")
+                    & (df["cg"].str.match(m_re_cg, na=False))
+                ].copy()
+                match_col_df = df_good_hits.cg.str.extract(m_re_cg).rename(
                     {0: "match_1_len"}, axis=1
                 )
-                match_col_df = match_col_df.astype({"match_1_len": "int32"})
+                match_col_df["match_1_len"] = _to_numeric_safe(
+                    match_col_df["match_1_len"]
+                )
 
                 df_good_hits.loc[match_col_df.index, match_col_df.columns] = (
                     match_col_df
                 )
 
                 thres = round(adaptor_end.len_constant * good_hit_threshold)
-                df_good_hits = df_good_hits[df_good_hits["match_1_len"] >= thres]
+                df_good_hits = _filter_on_numeric_threshold(
+                    df_good_hits, "match_1_len", thres
+                )
 
                 median_insert_length = None
                 insert_lengths_histogram = {}
                 insert_lengths = None
 
             # Filter multiple hits per read and adaptor end
-            df_good_hits = df_good_hits.sort_values(
-                by=["read_name", "match_1_len"], ascending=False
-            ).drop_duplicates(subset=["read_name", "adapter_name"], keep="first")
+            if len(df_good_hits) > 0:
+                df_good_hits = df_good_hits.sort_values(
+                    by=["read_name", "match_1_len"], ascending=False
+                ).drop_duplicates(subset=["read_name", "adapter_name"], keep="first")
+            else:
+                log.info(
+                    f"{adaptor.name}:{adaptor_end_name} had 0 good hits after filtering."
+                )
 
             if adaptor.name not in entries.keys():
                 entries[adaptor.name] = {}
@@ -234,6 +286,11 @@ def get_explore_results(
         else:
             results["excluded_adaptors"][adaptor.name] = adaptor_data
             log.info(f"Adaptor {adaptor.name} is excluded from the analysis")
+
+    if len(adaptors_included) == 0:
+        log.warning(
+            "No adaptor models reached the minimum required number of good hits."
+        )
 
     return results, adaptors_included, entries, umi_threshold, kmer_length, outdir
 

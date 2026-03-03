@@ -134,28 +134,34 @@ class AlignmentStat:
         self.adaptor_name = adaptor_name
         self.paf_stats = {}
 
+    @staticmethod
+    def _safe_fraction(numerator: int, denominator: int) -> float:
+        if denominator == 0:
+            return 0.0
+        return numerator / float(denominator)
+
     def compute_pafstats(self, num_fq, fragments, singletons, concats, unknowns):
         total = len(fragments) + len(singletons) + len(concats) + len(unknowns)
-        self.paf_stats["input_reads"] = [num_fq, 1.0]
+        self.paf_stats["input_reads"] = [num_fq, 1.0 if num_fq > 0 else 0.0]
         self.paf_stats["reads aligning to adaptor sequences"] = [
             total,
-            total / float(num_fq),
+            self._safe_fraction(total, num_fq),
         ]
         self.paf_stats["aligned reads matching both I7 and I5 adaptor"] = [
             len(fragments),
-            len(fragments) / float(total),
+            self._safe_fraction(len(fragments), total),
         ]
         self.paf_stats["aligned reads matching only I7 or I5 adaptor"] = [
             len(singletons),
-            len(singletons) / float(total),
+            self._safe_fraction(len(singletons), total),
         ]
         self.paf_stats["aligned reads matching multiple I7/I5 adaptor pairs"] = [
             len(concats),
-            len(concats) / float(total),
+            self._safe_fraction(len(concats), total),
         ]
         self.paf_stats["aligned reads with uncategorized alignments"] = [
             len(unknowns),
-            len(unknowns) / float(total),
+            self._safe_fraction(len(unknowns), total),
         ]
 
 

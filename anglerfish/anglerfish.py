@@ -137,6 +137,11 @@ def run_demux(args):
             i7_name=f"{adaptor_name}_i7",
             reads_to_alns=reads_to_alns,
         )
+        total_hits = len(fragments) + len(singletons) + len(concats) + len(unknowns)
+        if total_hits == 0:
+            log.warning(
+                f" No adaptor hits found for {adaptor_bc_name}; nothing to demultiplex for this adaptor set."
+            )
         stats = AlignmentStat(adaptor_bc_name)
         stats.compute_pafstats(num_fq, fragments, singletons, concats, unknowns)
         report.add_alignment_stat(stats)
@@ -212,6 +217,11 @@ def run_demux(args):
         else:
             unmatched_bed, matched_bed = cluster_matches(
                 subset_rows, fragments, args.max_distance
+            )
+
+        if len(matched_bed) == 0:
+            log.warning(
+                f" No reads matched samplesheet barcodes for {adaptor_bc_name} (max_distance={args.max_distance})."
             )
 
         out_pool = []
