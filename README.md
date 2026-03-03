@@ -146,6 +146,55 @@ Then run:
 anglerfish run -s /path/to/samples.csv
 ```
 
+### Anchor-based demultiplexing (for difficult ONT reads)
+
+If predefined adaptor models fail (for example: "No adaptor hits found"), use anchor mode:
+
+```shell
+anglerfish run -s /path/to/samples.csv --mode anchor --anchors illumina_dual_len8
+```
+
+Auto fallback mode (default) first tries alignment mode and then switches to anchor mode if adaptor hits are zero:
+
+```shell
+anglerfish run -s /path/to/samples.csv --mode auto
+```
+
+You can also provide explicit anchors:
+
+```shell
+anglerfish run -s /path/to/samples.csv \
+  --mode anchor \
+  --anchor-i7-left AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC \
+  --anchor-i7-right ATCTCGTATGCCGTCTTCTGCTTG \
+  --anchor-i5-left AATGATACGGCGACCACCGAGATCTACAC \
+  --anchor-i5-right ACACTCTTTCCCTACACGACGCTCTTCCGATCT \
+  --anchor-max-edits 3 \
+  --anchor-index-len-i7 8 \
+  --anchor-index-len-i5 8
+```
+
+For pools where i7 is constant, you can demultiplex using only i5:
+
+```shell
+anglerfish run -s /path/to/samples.csv --mode anchor --demux-by-i5-only
+```
+
+Example anchor-mode log lines:
+
+```text
+INFO:anglerfish: Running anchor-based index extraction for truseq_dual (max_edits=3).
+INFO:anglerfish: Anchor detection summary for truseq_dual: i7=21402 i5=21910 both=20788 matched=20511
+```
+
+### Diagnose mode
+
+Use diagnose mode to scan reads for common Illumina motifs and print recommended anchor settings:
+
+```shell
+anglerfish diagnose --fastq /path/to/reads.fastq.gz --max-reads 50000
+```
+
 ### Options
 
 #### Common
@@ -162,6 +211,19 @@ anglerfish run -s /path/to/samples.csv
                        Manually set maximum edit distance for BC matching, automatically set this is set to either 1 or 2
 --run_name RUN_NAME, -r RUN_NAME
                       Name of the run (default: anglerfish)
+--mode {auto,alignment,anchor}
+                      Demultiplex mode. `auto` falls back to anchor mode when no adaptor hits are found.
+--anchors ANCHORS     Anchor preset (currently `illumina_dual_len8`)
+--anchor-i7-left TEXT
+--anchor-i7-right TEXT
+--anchor-i5-left TEXT
+--anchor-i5-right TEXT
+--anchor-max-edits INTEGER
+                      Max edit distance when searching anchors
+--anchor-index-len-i7 INTEGER
+--anchor-index-len-i5 INTEGER
+--anchor-orientation {both,forward,reverse}
+--demux-by-i5-only    Ignore i7 and demultiplex by i5 only
 --debug, -d           Extra commandline output
 --version, -v         Print version and quit
 

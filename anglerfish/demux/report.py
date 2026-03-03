@@ -164,6 +164,24 @@ class AlignmentStat:
             self._safe_fraction(len(unknowns), total),
         ]
 
+    def add_anchorstats(self, num_fq: int, counts: dict[str, int], matched_reads: int):
+        self.paf_stats["reads with i7 anchor-detected index"] = [
+            counts.get("i7_detected", 0),
+            self._safe_fraction(counts.get("i7_detected", 0), num_fq),
+        ]
+        self.paf_stats["reads with i5 anchor-detected index"] = [
+            counts.get("i5_detected", 0),
+            self._safe_fraction(counts.get("i5_detected", 0), num_fq),
+        ]
+        self.paf_stats["reads with both i7 and i5 anchor-detected indices"] = [
+            counts.get("both_detected", 0),
+            self._safe_fraction(counts.get("both_detected", 0), num_fq),
+        ]
+        self.paf_stats["anchor-detected reads matching samplesheet barcodes"] = [
+            matched_reads,
+            self._safe_fraction(matched_reads, num_fq),
+        ]
+
 
 @dataclass
 class SampleStat:

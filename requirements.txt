@@ -3,6 +3,7 @@ numpy>=2.0
 pandas>=2.2
 python-Levenshtein>=0.27
 PyYAML>=6.0.2
+regex>=2024.11.6
 setuptools>=80
 typer>=0.15
 typing_extensions>=4.12

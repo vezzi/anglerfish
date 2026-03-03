@@ -9,6 +9,7 @@ import uuid
 from collections import Counter
 from importlib.metadata import version as get_version
 from itertools import groupby
+from pathlib import Path
 
 import Levenshtein as lev
 import numpy as np
@@ -23,6 +24,7 @@ from .demux.demux import (
 )
 from .demux.report import AlignmentStat, Report, SampleStat
 from .demux.samplesheet import SampleSheet
+from .demux.anchor import AnchorConfig, extract_indices_from_fastqs, match_extracted_reads
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("anglerfish")
@@ -43,15 +45,63 @@ anglerfish_logo = r"""
 """
 
 
+def _count_fastq_reads(fastq_files: list[str]) -> int:
+    num_fq_lines = 0
+    for fq_file in fastq_files:
+        path = Path(fq_file)
+        if path.suffix == ".gz":
+            handle = gzip.open(path, "rb")
+        else:
+            handle = open(path, "rb")
+        with handle as f:
+            for _ in f:
+                num_fq_lines += 1
+    return int(num_fq_lines / 4)
+
+
+def _resolve_anchor_preset(args):
+    if getattr(args, "anchors", "") == "illumina_dual_len8":
+        args.anchor_i7_left = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC"
+        args.anchor_i7_right = "ATCTCGTATGCCGTCTTCTGCTTG"
+        args.anchor_i5_left = "AATGATACGGCGACCACCGAGATCTACAC"
+        args.anchor_i5_right = "ACACTCTTTCCCTACACGACGCTCTTCCGATCT"
+        args.anchor_index_len_i7 = 8
+        args.anchor_index_len_i5 = 8
+    elif getattr(args, "anchors", "") not in ["", None]:
+        log.warning(
+            f" Unknown anchor preset '{args.anchors}'. Using explicit anchor arguments."
+        )
+
+
 def run_demux(args):
     # Boilerplate
-    multiprocessing.set_start_method("spawn")
+    try:
+        multiprocessing.set_start_method("spawn")
+    except RuntimeError:
+        pass
     version = get_version("bio-anglerfish")
     run_uuid = str(uuid.uuid4())
 
     # Parse arguments
     if args.debug:
         log.setLevel(logging.DEBUG)
+
+    # Backward-compatible defaults for direct function calls/tests bypassing the CLI parser.
+    for key, value in {
+        "demux_mode": "auto",
+        "anchors": "",
+        "anchor_i7_left": "AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC",
+        "anchor_i7_right": "ATCTCGTATGCCGTCTTCTGCTTG",
+        "anchor_i5_left": "AATGATACGGCGACCACCGAGATCTACAC",
+        "anchor_i5_right": "ACACTCTTTCCCTACACGACGCTCTTCCGATCT",
+        "anchor_max_edits": 3,
+        "anchor_index_len_i7": 8,
+        "anchor_index_len_i5": 8,
+        "anchor_orientation": "both",
+        "demux_by_i5_only": False,
+    }.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
 
     if args.threads > MAX_PROCESSES:
         log.warning(
@@ -75,6 +125,7 @@ def run_demux(args):
     # Instantiate samplesheet and report
     ss = SampleSheet(args.samplesheet, args.ont_barcodes)
     report = Report(args.run_name, run_uuid, version)
+    _resolve_anchor_preset(args)
 
     # Calculate the minimum edit distance between indices in the samplesheet
     min_distance = ss.minimum_bc_distance()
@@ -105,7 +156,10 @@ def run_demux(args):
         # Grab the fastq files for the current entries
         assert all([subset_rows[0].fastq == row.fastq for row in subset_rows])
         fastq_path = subset_rows[0].fastq
-        fastq_files = glob.glob(fastq_path)
+        fastq_files = sorted(glob.glob(fastq_path))
+        if len(fastq_files) == 0:
+            log.warning(f"No FASTQ files found for pattern: {fastq_path}")
+            continue
 
         # If there are multiple ONT barcodes, we need to add the ONT barcode to the adaptor name
         if ont_barcode:
@@ -113,111 +167,205 @@ def run_demux(args):
         else:
             adaptor_bc_name = adaptor_name
 
-        # Align
-        alignment_path: str = os.path.join(args.out_fastq, f"{adaptor_bc_name}.paf")
-        adaptor_fasta_path: str = os.path.join(args.out_fastq, f"{adaptor_name}.fasta")
-        with open(adaptor_fasta_path, "w") as f:
-            f.write(ss.get_fastastring(adaptor_name))
-        for fq_file in fastq_files:
-            run_minimap2(fq_file, adaptor_fasta_path, alignment_path, args.threads)
-
         # Easy line count in input fastq files
-        num_fq_lines = 0
-        for fq_file in fastq_files:
-            with gzip.open(fq_file, "rb") as f:
-                for i in f:
-                    num_fq_lines += 1
-        num_fq = int(num_fq_lines / 4)
-        reads_to_alns: dict[str, list[Alignment]] = map_reads_to_alns(alignment_path)
-
-        # Make stats
-        log.info(f" Searching for adaptor hits in {adaptor_bc_name}")
-        fragments, singletons, concats, unknowns = categorize_matches(
-            i5_name=f"{adaptor_name}_i5",
-            i7_name=f"{adaptor_name}_i7",
-            reads_to_alns=reads_to_alns,
-        )
-        total_hits = len(fragments) + len(singletons) + len(concats) + len(unknowns)
-        if total_hits == 0:
-            log.warning(
-                f" No adaptor hits found for {adaptor_bc_name}; nothing to demultiplex for this adaptor set."
-            )
         stats = AlignmentStat(adaptor_bc_name)
-        stats.compute_pafstats(num_fq, fragments, singletons, concats, unknowns)
-        report.add_alignment_stat(stats)
+        num_fq = _count_fastq_reads(fastq_files)
 
         # Demux
         flipped_i7 = False
         flipped_i5 = False
+        unmatched_bed: list[list] = []
+        matched_bed: list[list] = []
         flips = {
             "original": {"i7_reversed": False, "i5_reversed": False},
             "i7": {"i7_reversed": True, "i5_reversed": False},
             "i5": {"i7_reversed": False, "i5_reversed": True},
             "i7+i5": {"i7_reversed": True, "i5_reversed": True},
         }
-        if args.force_rc != "original":
-            log.info(
-                f" Force reverse complementing {args.force_rc} index for adaptor {adaptor_name}. Lenient mode is disabled"
-            )
-            unmatched_bed, matched_bed = cluster_matches(
-                subset_rows,
-                fragments,
-                args.max_distance,
-                **flips[args.force_rc],
-            )
-            flipped_i7, flipped_i5 = flips[args.force_rc].values()
-        elif args.lenient:  # Try reverse complementing the i5 and/or i7 indices and choose the best match
-            flipped = {}
-            results = []
-            pool = multiprocessing.Pool(
-                processes=4 if args.threads >= 4 else args.threads
-            )
-            results = []
-            for flip, rev in flips.items():
-                spawn = pool.apply_async(
-                    cluster_matches,
-                    args=(
-                        subset_rows,
-                        fragments,
-                        args.max_distance,
-                        rev["i7_reversed"],
-                        rev["i5_reversed"],
-                    ),
-                )
-                results.append((spawn, flip))
-            pool.close()
-            pool.join()
-            flipped = {result[1]: result[0].get() for result in results}
+        use_anchor_mode = args.demux_mode == "anchor"
+        fragments: dict[str, list[Alignment]] = {}
+        singletons: dict[str, list[Alignment]] = {}
+        concats: dict[str, list[Alignment]] = {}
+        unknowns: dict[str, list[Alignment]] = {}
 
-            best_flip = max(flipped, key=lambda k: len(flipped[k][1]))
+        if not use_anchor_mode:
+            # Align using predefined adaptor models
+            alignment_path: str = os.path.join(args.out_fastq, f"{adaptor_bc_name}.paf")
+            adaptor_fasta_path: str = os.path.join(args.out_fastq, f"{adaptor_name}.fasta")
+            with open(adaptor_fasta_path, "w") as f:
+                f.write(ss.get_fastastring(adaptor_name))
+            for fq_file in fastq_files:
+                run_minimap2(fq_file, adaptor_fasta_path, alignment_path, args.threads)
 
-            if (
-                sorted([len(i[1]) for i in flipped.values()])[-1]
-                == sorted([len(i[1]) for i in flipped.values()])[-2]
-            ):
+            reads_to_alns: dict[str, list[Alignment]] = map_reads_to_alns(alignment_path)
+            log.info(f" Searching for adaptor hits in {adaptor_bc_name}")
+            fragments, singletons, concats, unknowns = categorize_matches(
+                i5_name=f"{adaptor_name}_i5",
+                i7_name=f"{adaptor_name}_i7",
+                reads_to_alns=reads_to_alns,
+            )
+            total_hits = len(fragments) + len(singletons) + len(concats) + len(unknowns)
+            stats.compute_pafstats(num_fq, fragments, singletons, concats, unknowns)
+
+            if total_hits == 0:
                 log.warning(
-                    " Lenient mode: Could not find any barcode reverse complements with unambiguously more matches. Using original index orientation for all adaptors. Please study the results carefully!"
+                    f" No adaptor hits found for {adaptor_bc_name}; nothing to demultiplex for this adaptor set."
                 )
-                unmatched_bed, matched_bed = flipped["original"]
-            elif (
-                best_flip != "None"
-                and len(flipped[best_flip][1])
-                > len(flipped["original"][1]) * args.lenient_factor
-            ):
-                log.info(
-                    f" Lenient mode: Reverse complementing {best_flip} index for adaptor {adaptor_name} found at least {args.lenient_factor} times more matches"
-                )
-                unmatched_bed, matched_bed = flipped[best_flip]
-                flipped_i7, flipped_i5 = flips[best_flip].values()
-            else:
-                log.info(
-                    f" Lenient mode: using original index orientation for {adaptor_name}"
-                )
-                unmatched_bed, matched_bed = flipped["original"]
-        else:
-            unmatched_bed, matched_bed = cluster_matches(
-                subset_rows, fragments, args.max_distance
+                if args.demux_mode == "auto":
+                    log.info(
+                        f" Falling back to anchor mode for {adaptor_bc_name} because adaptor hits are zero."
+                    )
+                    use_anchor_mode = True
+
+        if use_anchor_mode:
+            if args.demux_mode == "anchor":
+                stats.compute_pafstats(num_fq, {}, {}, {}, {})
+            log.info(
+                f" Running anchor-based index extraction for {adaptor_bc_name} (max_edits={args.anchor_max_edits})."
             )
+            anchor_config = AnchorConfig(
+                i7_left=args.anchor_i7_left,
+                i7_right=args.anchor_i7_right,
+                i5_left=args.anchor_i5_left,
+                i5_right=args.anchor_i5_right,
+                max_edits=args.anchor_max_edits,
+                i7_index_len=args.anchor_index_len_i7,
+                i5_index_len=args.anchor_index_len_i5,
+                orientation=args.anchor_orientation,
+            )
+            extracted_reads, anchor_counts = extract_indices_from_fastqs(
+                fastq_files, anchor_config
+            )
+
+            if args.force_rc != "original":
+                log.info(
+                    f" Force reverse complementing {args.force_rc} index for adaptor {adaptor_name}. Lenient mode is disabled"
+                )
+                unmatched_bed, matched_bed = match_extracted_reads(
+                    subset_rows,
+                    extracted_reads,
+                    args.max_distance,
+                    demux_by_i5_only=args.demux_by_i5_only,
+                    **flips[args.force_rc],
+                )
+                flipped_i7, flipped_i5 = flips[args.force_rc].values()
+            elif args.lenient:
+                flipped = {}
+                for flip, rev in flips.items():
+                    flipped[flip] = match_extracted_reads(
+                        subset_rows,
+                        extracted_reads,
+                        args.max_distance,
+                        demux_by_i5_only=args.demux_by_i5_only,
+                        i7_reversed=rev["i7_reversed"],
+                        i5_reversed=rev["i5_reversed"],
+                    )
+                best_flip = max(flipped, key=lambda k: len(flipped[k][1]))
+                if (
+                    sorted([len(i[1]) for i in flipped.values()])[-1]
+                    == sorted([len(i[1]) for i in flipped.values()])[-2]
+                ):
+                    log.warning(
+                        " Lenient mode: Could not find any barcode reverse complements with unambiguously more matches. Using original index orientation for all adaptors. Please study the results carefully!"
+                    )
+                    unmatched_bed, matched_bed = flipped["original"]
+                elif (
+                    best_flip != "None"
+                    and len(flipped[best_flip][1])
+                    > len(flipped["original"][1]) * args.lenient_factor
+                ):
+                    log.info(
+                        f" Lenient mode: Reverse complementing {best_flip} index for adaptor {adaptor_name} found at least {args.lenient_factor} times more matches"
+                    )
+                    unmatched_bed, matched_bed = flipped[best_flip]
+                    flipped_i7, flipped_i5 = flips[best_flip].values()
+                else:
+                    log.info(
+                        f" Lenient mode: using original index orientation for {adaptor_name}"
+                    )
+                    unmatched_bed, matched_bed = flipped["original"]
+            else:
+                unmatched_bed, matched_bed = match_extracted_reads(
+                    subset_rows,
+                    extracted_reads,
+                    args.max_distance,
+                    demux_by_i5_only=args.demux_by_i5_only,
+                )
+            stats.add_anchorstats(num_fq, anchor_counts, len(matched_bed))
+            log.info(
+                " Anchor detection summary for %s: i7=%s i5=%s both=%s matched=%s",
+                adaptor_bc_name,
+                anchor_counts["i7_detected"],
+                anchor_counts["i5_detected"],
+                anchor_counts["both_detected"],
+                len(matched_bed),
+            )
+        else:
+            if args.force_rc != "original":
+                log.info(
+                    f" Force reverse complementing {args.force_rc} index for adaptor {adaptor_name}. Lenient mode is disabled"
+                )
+                unmatched_bed, matched_bed = cluster_matches(
+                    subset_rows,
+                    fragments,
+                    args.max_distance,
+                    **flips[args.force_rc],
+                )
+                flipped_i7, flipped_i5 = flips[args.force_rc].values()
+            elif args.lenient:  # Try reverse complementing the i5 and/or i7 indices and choose the best match
+                flipped = {}
+                results = []
+                pool = multiprocessing.Pool(
+                    processes=4 if args.threads >= 4 else args.threads
+                )
+                results = []
+                for flip, rev in flips.items():
+                    spawn = pool.apply_async(
+                        cluster_matches,
+                        args=(
+                            subset_rows,
+                            fragments,
+                            args.max_distance,
+                            rev["i7_reversed"],
+                            rev["i5_reversed"],
+                        ),
+                    )
+                    results.append((spawn, flip))
+                pool.close()
+                pool.join()
+                flipped = {result[1]: result[0].get() for result in results}
+
+                best_flip = max(flipped, key=lambda k: len(flipped[k][1]))
+
+                if (
+                    sorted([len(i[1]) for i in flipped.values()])[-1]
+                    == sorted([len(i[1]) for i in flipped.values()])[-2]
+                ):
+                    log.warning(
+                        " Lenient mode: Could not find any barcode reverse complements with unambiguously more matches. Using original index orientation for all adaptors. Please study the results carefully!"
+                    )
+                    unmatched_bed, matched_bed = flipped["original"]
+                elif (
+                    best_flip != "None"
+                    and len(flipped[best_flip][1])
+                    > len(flipped["original"][1]) * args.lenient_factor
+                ):
+                    log.info(
+                        f" Lenient mode: Reverse complementing {best_flip} index for adaptor {adaptor_name} found at least {args.lenient_factor} times more matches"
+                    )
+                    unmatched_bed, matched_bed = flipped[best_flip]
+                    flipped_i7, flipped_i5 = flips[best_flip].values()
+                else:
+                    log.info(
+                        f" Lenient mode: using original index orientation for {adaptor_name}"
+                    )
+                    unmatched_bed, matched_bed = flipped["original"]
+            else:
+                unmatched_bed, matched_bed = cluster_matches(
+                    subset_rows, fragments, args.max_distance
+                )
+
+        report.add_alignment_stat(stats)
 
         if len(matched_bed) == 0:
             log.warning(
@@ -279,16 +427,22 @@ def run_demux(args):
         # We search for the closest sample in the samplesheet to the list of unknowns
         top_unknowns = []
         for i in nomatch_count.most_common(args.max_unknowns):
-            sample_dists = [
-                (
-                    lev.distance(
-                        i[0],
-                        f"{x.adaptor.i7.index_seq}+{x.adaptor.i5.index_seq}".lower(),
-                    ),
-                    x.sample_name,
-                )
-                for x in ss
-            ]
+            if args.demux_by_i5_only:
+                sample_dists = [
+                    (lev.distance(i[0], (x.adaptor.i5.index_seq or "").lower()), x.sample_name)
+                    for x in ss
+                ]
+            else:
+                sample_dists = [
+                    (
+                        lev.distance(
+                            i[0],
+                            f"{x.adaptor.i7.index_seq}+{x.adaptor.i5.index_seq}".lower(),
+                        ),
+                        x.sample_name,
+                    )
+                    for x in ss
+                ]
             closest_sample = min(sample_dists, key=lambda x: x[0])
             # If the distance is more than half the index length, we remove it
             if closest_sample[0] >= (len(i[0]) / 2) + 1:
@@ -317,7 +471,9 @@ def run_demux(args):
         if entry.sample_name not in [
             s.sample_name for s in [stat for stat in report.sample_stats]
         ]:
-            sample_stat = SampleStat(entry.sample_name, 0, 0, 0, False, ont_barcode)
+            sample_stat = SampleStat(
+                entry.sample_name, 0, 0, 0, False, False, entry.ont_barcode
+            )
             report.add_sample_stat(sample_stat)
 
     report.write_report(args.out_fastq)
