@@ -15,6 +15,8 @@ For more information on how this can be used, please see this [poster](docs/AGBT
 
 ## Installation
 
+Anglerfish currently targets modern Python only and requires **Python 3.12+**.
+
 ### From PyPi
 
 ```
@@ -33,54 +35,52 @@ conda install -c bioconda anglerfish
 pip install --upgrade --force-reinstall git+https://github.com/NationalGenomicsInfrastructure/anglerfish.git
 ```
 
-### For Arm64 processors (e.g. Apple M2)
+### Arm64 processors (Apple Silicon: M1/M2/M3)
 
-Anglerfish depends on minimap2 which needs to be [compiled from source](https://github.com/lh3/minimap2?tab=readme-ov-file#installation) for Arm64 processors.
-When minimap2 is compiled and available on $PATH, anglerfish can be installed with pip:
+Anglerfish requires `minimap2` on `PATH`.
 
-```shell
-pip install bio-anglerfish
-```
+- Using Conda: `conda install -c bioconda minimap2`
+- Using Homebrew: `brew install minimap2`
 
-Additionaly, if Docker is your cup of tea, the Dockerfile supplied in this repository should also work on both arm64 and x86 processors.
+Additionally, if Docker is your cup of tea, the Dockerfile supplied in this repository should also work on both arm64 and x86 processors.
 
 ## Source development
 
 1. [Install miniconda](https://docs.conda.io/en/latest/miniconda.html).
 
-2. Set up repo clone with editable install
-
-For x86 processors (e.g. Intel/AMD):
+2. Set up a clean, dedicated development environment (recommended for all platforms):
 
 ```
 git clone https://github.com/NationalGenomicsInfrastructure/anglerfish.git
 cd anglerfish
-# Create a the anglerfish conda environment
 conda env create -f environment.yml
-# Install anglerfish
 conda activate anglerfish-dev
+python --version
+```
+
+`python --version` should report `3.12.x` or newer.
+
+3. Install editable package for development.
+
+Recommended:
+
+```
 pip install -e ".[dev]"
 ```
 
-For Arm64 processors (e.g. Apple M1/M2). First [compile and install minimap2 manually](https://github.com/lh3/minimap2?tab=readme-ov-file#installation), then:
+Legacy/setuptools flow (if you explicitly want `setup.py develop`):
 
 ```
-git clone https://github.com/NationalGenomicsInfrastructure/anglerfish.git
-cd anglerfish
-# Create a the anglerfish conda environment (but remove minimap2)
-conda env create -f <(grep -v minimap2 environment.yml)
-# Install anglerfish
-conda activate anglerfish-dev
-pip install -e ".[dev]"
+python setup.py develop
 ```
 
-3. (Optional) Install pre-commit to prevent committing code that will fail linting
+4. (Optional) Install pre-commit hooks
 
 ```
 pre-commit install
 ```
 
-4. (Optional) Enable automatic formatting in VS Code by creating `.vscode/settings.json` with:
+5. (Optional) Enable automatic formatting in VS Code by creating `.vscode/settings.json` with:
 
 ```
 {
@@ -91,6 +91,27 @@ pre-commit install
   },
   "prettier.configPath": "./pyproject.toml"
 }
+```
+
+### Troubleshooting environment issues
+
+If you see errors like:
+
+```
+Package 'bio-anglerfish' requires a different Python: 3.9.x not in '>=3.12'
+```
+
+you are using the wrong environment (typically a shared Python 3.9 env). Activate the dedicated environment:
+
+```
+conda activate anglerfish-dev
+python --version
+```
+
+If you still see old dependency conflicts in a shared env, remove previous editable/wheel installs first:
+
+```
+pip uninstall -y bio-anglerfish anglerfish
 ```
 
 ## Usage

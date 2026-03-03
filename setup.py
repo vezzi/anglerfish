@@ -20,6 +20,16 @@ long_description = (this_directory / "README.md").read_text()
 
 version = "0.7.0"
 
+
+def _load_requirements(path: str = "requirements.txt") -> list[str]:
+    reqs: list[str] = []
+    with open(path) as f:
+        for line in f:
+            dep = line.strip()
+            if dep and not dep.startswith("#"):
+                reqs.append(dep)
+    return reqs
+
 setup(
     name="bio-anglerfish",
     version=version,
@@ -33,9 +43,16 @@ setup(
     python_requires=">=3.12",
     packages=find_packages(),
     package_data={"": ["config/adaptors.yaml"]},
-    # Read requirements.txt
-    install_requires=[x.strip() for x in open("requirements.txt").readlines()],
-    extras_require={"dev": ["ruff", "mypy", "editorconfig-checker"]},
+    install_requires=_load_requirements(),
+    extras_require={
+        "dev": [
+            "pytest>=8.4",
+            "ruff>=0.15",
+            "mypy>=1.19",
+            "editorconfig-checker>=3.6",
+            "pre-commit>=4.3",
+        ]
+    },
     entry_points={
         "console_scripts": [
             "anglerfish=anglerfish.cli:app",
@@ -48,9 +65,11 @@ setup(
         "Intended Audience :: Developers",
         "Intended Audience :: Healthcare Industry",
         "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: POSIX :: Linux",
         "Programming Language :: Python",
+        "Programming Language :: Python :: 3 :: Only",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Topic :: Scientific/Engineering",
         "Topic :: Scientific/Engineering :: Medical Science Apps.",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
